@@ -152,6 +152,56 @@ header {
   cursor: grabbing;
 }
 
+/* DOM-based preview frame */
+.preview-frame {
+  position: relative;
+  background: #000;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  display: flex;
+  overflow: hidden;
+  width: auto;
+  max-width: 100%;
+  max-height: 70vh;
+  aspect-ratio: 9 / 16;
+}
+.preview-frame.layout-vertical { flex-direction: column; }
+.preview-frame.layout-horizontal { flex-direction: row; }
+.preview-frame.empty .cell { display: none; }
+.preview-frame.empty {
+  background: repeating-linear-gradient(45deg, #1a1812, #1a1812 10px, #16140f 10px, #16140f 20px);
+  width: 320px;
+  aspect-ratio: 9/16;
+}
+
+.cell {
+  position: relative;
+  overflow: hidden;
+  background: #000;
+  flex: 0 0 50%;
+  cursor: grab;
+  touch-action: none;
+  min-height: 0;
+  min-width: 0;
+}
+.cell.dragging { cursor: grabbing; }
+.cell-inner {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.cell-inner video,
+.cell-inner img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center center;
+  display: block;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .canvas-stage {
   background: var(--bg-2);
   border: 1px solid var(--line);
@@ -191,6 +241,26 @@ header {
   color: var(--ink-dim);
   font-size: 18px;
   pointer-events: none;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 80%;
+}
+
+.tap-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 5;
+  font-family: 'Fraunces', serif;
+  font-style: italic;
+  font-size: 22px;
+  color: var(--accent-2);
+  letter-spacing: 0.05em;
 }
 
 /* Controls */
@@ -536,8 +606,19 @@ header {
         <span id="dimReadout">— × —</span>
       </div>
       <div class="canvas-stage">
-        <canvas id="previewCanvas" class="empty" width="1080" height="1920"></canvas>
-        <div class="empty-msg" id="emptyMsg">Upload a video and an image to begin</div>
+        <div class="preview-frame layout-vertical empty" id="previewFrame">
+          <div class="cell" id="cellA">
+            <div class="cell-inner" id="cellAInner"></div>
+          </div>
+          <div class="cell" id="cellB">
+            <div class="cell-inner" id="cellBInner"></div>
+          </div>
+          <div class="empty-msg" id="emptyMsg">Upload a video and an image to begin</div>
+          <div class="tap-overlay" id="tapOverlay" style="display:none;">
+            <span>▶ Tap to play</span>
+          </div>
+        </div>
+        <canvas id="previewCanvas" style="display:none;" width="1440" height="2560"></canvas>
       </div>
     </div>
 
@@ -667,15 +748,13 @@ header {
 <script>
 const state = {
   videoFile: null,
-  videoEl: null,
+  videoEl: null,        // <video> element used both in preview AND for export sampling
   imageFile: null,
   imageEl: null,
-  layout: 'vertical', // vertical | horizontal
-  swapped: false, // false: video first (top/left), true: image first
+  layout: 'vertical',
+  swapped: false,
   split: 0.5,
-  // Crop offsets per source: -1 to 1, where 0 is centered
-  // For portrait source in landscape cell: offsetY shifts vertically
-  // For landscape source in portrait cell: offsetX shifts horizontally
+  // crop offsets per source: -1..1 (0 = centered)
   videoOffset: { x: 0, y: 0 },
   imageOffset: { x: 0, y: 0 },
   width: 1440,
@@ -685,64 +764,212 @@ const state = {
 };
 
 const PRESETS = {
-  '1:1':   { w: 1440, h: 1440 },   // 2K square
-  '4:5':   { w: 1440, h: 1800 },   // 2K 4:5
-  '9:16':  { w: 1440, h: 2560 },   // true 2K vertical
-  '4K':    { w: 2160, h: 3840 },   // 4K vertical
+  '1:1':   { w: 1440, h: 1440 },
+  '4:5':   { w: 1440, h: 1800 },
+  '9:16':  { w: 1440, h: 2560 },
+  '4K':    { w: 2160, h: 3840 },
 };
 
-const canvas = document.getElementById('previewCanvas');
-const ctx = canvas.getContext('2d');
+const previewFrame = document.getElementById('previewFrame');
+const cellA = document.getElementById('cellA');
+const cellB = document.getElementById('cellB');
+const cellAInner = document.getElementById('cellAInner');
+const cellBInner = document.getElementById('cellBInner');
 const emptyMsg = document.getElementById('emptyMsg');
 const dimReadout = document.getElementById('dimReadout');
+const canvas = document.getElementById('previewCanvas');
+const ctx = canvas.getContext('2d');
 
-// ----- File inputs
+function showError(msg) {
+  const p = document.getElementById('progress');
+  if (p) p.textContent = '⚠ ' + msg;
+}
+function clearError() {
+  const p = document.getElementById('progress');
+  if (p && p.textContent.startsWith('⚠')) p.textContent = '';
+}
+
+// ----- Video upload
 document.getElementById('videoInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   state.videoFile = file;
   document.getElementById('videoName').textContent = file.name;
   document.getElementById('videoZone').classList.add('has-file');
+  clearError();
 
-  if (state.videoEl) URL.revokeObjectURL(state.videoEl.src);
+  if (state.videoEl) {
+    try { state.videoEl.pause(); } catch(_) {}
+    try { URL.revokeObjectURL(state.videoEl.src); } catch(_) {}
+    if (state.videoEl.parentNode) state.videoEl.parentNode.removeChild(state.videoEl);
+  }
+
   const v = document.createElement('video');
-  v.src = URL.createObjectURL(file);
   v.muted = true;
+  v.defaultMuted = true;
   v.loop = true;
+  v.autoplay = true;
   v.playsInline = true;
-  await new Promise((res) => v.addEventListener('loadeddata', res, { once: true }));
-  v.play();
+  v.setAttribute('playsinline', '');
+  v.setAttribute('webkit-playsinline', '');
+  v.setAttribute('muted', '');
+  v.setAttribute('autoplay', '');
+  v.setAttribute('loop', '');
+  v.preload = 'auto';
+
+  let loaded = false;
+  v.addEventListener('loadedmetadata', () => { loaded = true; });
+  v.addEventListener('error', () => {
+    showError('Could not read this video. Try a .mp4 (H.264).');
+  });
+
+  v.src = URL.createObjectURL(file);
+
   state.videoEl = v;
+
+  // Wait briefly for metadata
+  await new Promise(res => {
+    if (loaded) return res();
+    v.addEventListener('loadedmetadata', res, { once: true });
+    setTimeout(res, 1500);
+  });
+
+  // Try to play (ignore failures — user gesture later will unblock)
+  const p = v.play();
+  if (p && p.catch) p.catch(() => {});
+
+  updatePreview();
   checkReady();
 });
 
+// ----- Image upload
 document.getElementById('imageInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   state.imageFile = file;
   document.getElementById('imageName').textContent = file.name;
   document.getElementById('imageZone').classList.add('has-file');
+  clearError();
 
-  if (state.imageEl) URL.revokeObjectURL(state.imageEl.src);
+  if (state.imageEl) {
+    try { URL.revokeObjectURL(state.imageEl.src); } catch(_) {}
+  }
   const img = new Image();
   img.src = URL.createObjectURL(file);
-  await new Promise((res) => img.addEventListener('load', res, { once: true }));
+  await new Promise((res) => {
+    img.addEventListener('load', res, { once: true });
+    img.addEventListener('error', res, { once: true });
+    setTimeout(res, 2000);
+  });
   state.imageEl = img;
+  updatePreview();
   checkReady();
 });
 
 function checkReady() {
   const ready = state.videoEl && state.imageEl;
   document.getElementById('exportBtn').disabled = !ready || state.exporting;
-  if (ready) emptyMsg.style.display = 'none';
+  if (ready && emptyMsg) emptyMsg.style.display = 'none';
+  if (ready) maybeShowTapOverlay();
 }
 
-// ----- Layout
+const tapOverlay = document.getElementById('tapOverlay');
+function maybeShowTapOverlay() {
+  if (!state.videoEl) {
+    tapOverlay.style.display = 'none';
+    return;
+  }
+  if (state.videoEl.paused) {
+    tapOverlay.style.display = 'flex';
+  } else {
+    tapOverlay.style.display = 'none';
+  }
+}
+tapOverlay.addEventListener('click', async () => {
+  if (state.videoEl) {
+    try { await state.videoEl.play(); } catch(e) {
+      showError('Browser blocked playback. Try opening this page in Safari directly (not from inside an app).');
+    }
+    maybeShowTapOverlay();
+  }
+});
+// Periodically sync overlay state in case video stalls
+setInterval(maybeShowTapOverlay, 600);
+
+// ----- Mount sources to cells (DOM preview)
+// We re-mount on swap/layout changes so the right element is in the right cell.
+function updatePreview() {
+  if (!state.videoEl && !state.imageEl) return;
+
+  // Determine which source goes into which cell
+  // Cell A = first (top or left), Cell B = second (bottom or right)
+  const firstSource = state.swapped ? 'image' : 'video';
+  const secondSource = state.swapped ? 'video' : 'image';
+
+  mountSource(cellAInner, firstSource);
+  mountSource(cellBInner, secondSource);
+
+  // Apply layout direction
+  previewFrame.classList.toggle('layout-vertical', state.layout === 'vertical');
+  previewFrame.classList.toggle('layout-horizontal', state.layout === 'horizontal');
+  previewFrame.classList.remove('empty');
+
+  // Aspect ratio for preview frame
+  previewFrame.style.aspectRatio = `${state.width} / ${state.height}`;
+
+  // Apply split
+  const aSize = (state.split * 100) + '%';
+  const bSize = ((1 - state.split) * 100) + '%';
+  cellA.style.flex = `0 0 ${aSize}`;
+  cellB.style.flex = `0 0 ${bSize}`;
+
+  // Apply crop offsets via CSS transform on inner element's media
+  applyOffset(cellAInner, firstSource);
+  applyOffset(cellBInner, secondSource);
+
+  if (dimReadout) dimReadout.textContent = `${state.width} × ${state.height}`;
+}
+
+function mountSource(container, sourceName) {
+  const el = sourceName === 'video' ? state.videoEl : state.imageEl;
+  if (!el) {
+    container.innerHTML = '';
+    return;
+  }
+  // Only re-mount if the current child isn't this element
+  if (container.firstElementChild !== el) {
+    container.innerHTML = '';
+    container.appendChild(el);
+  }
+  // Reset any stale inline sizing from previous logic
+  el.style.width = '';
+  el.style.height = '';
+  el.style.minWidth = '';
+  el.style.minHeight = '';
+  el.style.transform = '';
+  el.style.position = '';
+  el.style.top = '';
+  el.style.left = '';
+}
+
+function applyOffset(container, sourceName) {
+  const el = container.firstElementChild;
+  if (!el) return;
+  const offset = sourceName === 'video' ? state.videoOffset : state.imageOffset;
+  // object-position: percent maps -1..1 to 0%..100%
+  // offset.x = -1 -> show left edge (0%), offset.x = 1 -> show right edge (100%)
+  const px = ((offset.x + 1) / 2) * 100;
+  const py = ((offset.y + 1) / 2) * 100;
+  el.style.objectPosition = `${px}% ${py}%`;
+}
+
+// ----- Layout buttons
 document.querySelectorAll('.layout-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.layout-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     state.layout = btn.dataset.layout;
+    updatePreview();
   });
 });
 
@@ -753,6 +980,7 @@ swapBtn.addEventListener('click', () => {
   state.swapped = !state.swapped;
   swapBtn.classList.toggle('swapped', state.swapped);
   swapLabel.textContent = state.swapped ? 'Image first' : 'Video first';
+  updatePreview();
 });
 
 // ----- Split
@@ -761,131 +989,110 @@ const splitVal = document.getElementById('splitVal');
 splitInput.addEventListener('input', () => {
   state.split = splitInput.value / 100;
   splitVal.textContent = splitInput.value + '%';
+  updatePreview();
 });
 
 // ----- Reset crops
 document.getElementById('resetCropBtn').addEventListener('click', () => {
   state.videoOffset = { x: 0, y: 0 };
   state.imageOffset = { x: 0, y: 0 };
+  updatePreview();
 });
 
-// ----- Drag to reposition crop
-let drag = null; // { source: 'video'|'image', startX, startY, startOffset, cellRect }
-
-function getEventPos(e) {
-  const rect = canvas.getBoundingClientRect();
-  const t = e.touches ? e.touches[0] : e;
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  return {
-    x: (t.clientX - rect.left) * scaleX,
-    y: (t.clientY - rect.top) * scaleY,
-    clientX: t.clientX,
-    clientY: t.clientY,
-  };
-}
-
-function findCellAt(canvasX, canvasY) {
-  for (const r of cellRects) {
-    if (canvasX >= r.x && canvasX < r.x + r.w &&
-        canvasY >= r.y && canvasY < r.y + r.h) return r;
-  }
+// ----- Drag to reposition (per cell)
+function getSourceForCell(cellEl) {
+  // cellA holds first source, cellB holds second
+  if (cellEl === cellA) return state.swapped ? 'image' : 'video';
+  if (cellEl === cellB) return state.swapped ? 'video' : 'image';
   return null;
 }
 
-function getSourceEl(name) {
-  return name === 'video' ? state.videoEl : state.imageEl;
-}
-function getOffset(name) {
-  return name === 'video' ? state.videoOffset : state.imageOffset;
-}
+let drag = null;
 
-function startDrag(e) {
-  if (!state.videoEl || !state.imageEl) return;
-  const pos = getEventPos(e);
-  const cell = findCellAt(pos.x, pos.y);
-  if (!cell) return;
-  e.preventDefault();
-  const offset = getOffset(cell.source);
-  drag = {
-    source: cell.source,
-    startClientX: pos.clientX,
-    startClientY: pos.clientY,
-    startOffset: { ...offset },
-    cellRect: cell,
+function onCellPointerDown(cellEl) {
+  return (e) => {
+    if (!state.videoEl || !state.imageEl) return;
+    // Try to resume video on this user gesture (iOS unlock)
+    if (state.videoEl.paused) {
+      const p = state.videoEl.play();
+      if (p && p.catch) p.catch(() => {});
+    }
+    e.preventDefault();
+    const t = e.touches ? e.touches[0] : e;
+    const sourceName = getSourceForCell(cellEl);
+    const offset = sourceName === 'video' ? state.videoOffset : state.imageOffset;
+
+    const rect = cellEl.getBoundingClientRect();
+    drag = {
+      sourceName,
+      cellEl,
+      startClientX: t.clientX,
+      startClientY: t.clientY,
+      startOffset: { ...offset },
+      cellW: rect.width,
+      cellH: rect.height,
+    };
+    cellEl.classList.add('dragging');
   };
-  canvas.classList.add('dragging');
 }
 
-function moveDrag(e) {
+function onPointerMove(e) {
   if (!drag) return;
   e.preventDefault();
   const t = e.touches ? e.touches[0] : e;
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const dxClient = t.clientX - drag.startClientX;
-  const dyClient = t.clientY - drag.startClientY;
-  const dxCanvas = dxClient * scaleX;
-  const dyCanvas = dyClient * scaleY;
+  const dx = t.clientX - drag.startClientX;
+  const dy = t.clientY - drag.startClientY;
 
-  const src = getSourceEl(drag.source);
-  const srcW = src.videoWidth || src.naturalWidth || src.width;
-  const srcH = src.videoHeight || src.naturalHeight || src.height;
-  const sw = drag.cellRect.w;
-  const sh = drag.cellRect.h;
-  const targetRatio = sw / sh;
+  const el = drag.sourceName === 'video' ? state.videoEl : state.imageEl;
+  const srcW = el.videoWidth || el.naturalWidth;
+  const srcH = el.videoHeight || el.naturalHeight;
+  if (!srcW || !srcH) return;
+
+  const cellRatio = drag.cellW / drag.cellH;
   const sourceRatio = srcW / srcH;
 
-  // Compute the visible region size in source pixels and how much "slack" is available
-  let drawW, drawH, slackX = 0, slackY = 0;
-  if (sourceRatio > targetRatio) {
-    drawH = srcH;
-    drawW = srcH * targetRatio;
-    slackX = (srcW - drawW); // total moveable range in source pixels
+  // With object-fit: cover, compute how much overflow exists in the cell
+  let displayW, displayH;
+  if (sourceRatio > cellRatio) {
+    displayH = drag.cellH;
+    displayW = drag.cellH * sourceRatio;
   } else {
-    drawW = srcW;
-    drawH = srcW / targetRatio;
-    slackY = (srcH - drawH);
+    displayW = drag.cellW;
+    displayH = drag.cellW / sourceRatio;
   }
-
-  // Convert canvas drag distance to source-pixel distance
-  // In the cell, canvas px maps to source px by ratio drawW/sw (or drawH/sh)
-  const sourcePerCanvasX = drawW / sw;
-  const sourcePerCanvasY = drawH / sh;
+  const overflowX = displayW - drag.cellW;
+  const overflowY = displayH - drag.cellH;
 
   const newOffset = { ...drag.startOffset };
-
-  if (slackX > 0) {
-    // Drag right -> show more of the left side -> dx in source decreases
-    const deltaSourcePx = -dxCanvas * sourcePerCanvasX;
-    // offset.x in [-1,1] maps to [0, slackX]; default center is slackX/2
-    // dx_source = slackX/2 + offset.x * slackX/2
-    // so delta in offset.x = (delta in dx_source) / (slackX/2)
-    newOffset.x = drag.startOffset.x + (deltaSourcePx / (slackX / 2));
+  // 1px drag in cell shifts visible content by 1px; overflow/2 = full range half
+  if (overflowX > 0.5) {
+    newOffset.x = drag.startOffset.x + (-dx * 2 / overflowX);
     newOffset.x = Math.max(-1, Math.min(1, newOffset.x));
   }
-  if (slackY > 0) {
-    const deltaSourcePy = -dyCanvas * sourcePerCanvasY;
-    newOffset.y = drag.startOffset.y + (deltaSourcePy / (slackY / 2));
+  if (overflowY > 0.5) {
+    newOffset.y = drag.startOffset.y + (-dy * 2 / overflowY);
     newOffset.y = Math.max(-1, Math.min(1, newOffset.y));
   }
-
-  if (drag.source === 'video') state.videoOffset = newOffset;
+  if (drag.sourceName === 'video') state.videoOffset = newOffset;
   else state.imageOffset = newOffset;
+
+  // Apply just the offset, not full re-mount
+  applyOffset(drag.cellEl === cellA ? cellAInner : cellBInner, drag.sourceName);
 }
 
-function endDrag() {
+function onPointerEnd() {
+  if (drag && drag.cellEl) drag.cellEl.classList.remove('dragging');
   drag = null;
-  canvas.classList.remove('dragging');
 }
 
-canvas.addEventListener('mousedown', startDrag);
-window.addEventListener('mousemove', moveDrag);
-window.addEventListener('mouseup', endDrag);
-canvas.addEventListener('touchstart', startDrag, { passive: false });
-window.addEventListener('touchmove', moveDrag, { passive: false });
-window.addEventListener('touchend', endDrag);
+cellA.addEventListener('mousedown', onCellPointerDown(cellA));
+cellB.addEventListener('mousedown', onCellPointerDown(cellB));
+cellA.addEventListener('touchstart', onCellPointerDown(cellA), { passive: false });
+cellB.addEventListener('touchstart', onCellPointerDown(cellB), { passive: false });
+window.addEventListener('mousemove', onPointerMove);
+window.addEventListener('touchmove', onPointerMove, { passive: false });
+window.addEventListener('mouseup', onPointerEnd);
+window.addEventListener('touchend', onPointerEnd);
 
 // ----- Preset / size
 const widthInput = document.getElementById('widthInput');
@@ -903,96 +1110,23 @@ document.querySelectorAll('.preset').forEach(btn => {
       state.width = PRESETS[p].w;
       state.height = PRESETS[p].h;
     }
+    updatePreview();
   });
 });
 
 [widthInput, heightInput].forEach(el => {
   el.addEventListener('input', () => {
-    state.width = parseInt(widthInput.value) || 1080;
-    state.height = parseInt(heightInput.value) || 1920;
+    state.width = parseInt(widthInput.value) || 1440;
+    state.height = parseInt(heightInput.value) || 2560;
     document.querySelectorAll('.preset').forEach(b => b.classList.remove('active'));
     document.querySelector('[data-preset="custom"]').classList.add('active');
     state.preset = 'custom';
+    updatePreview();
   });
 });
 
-// ----- Drawing helpers
-function drawCover(targetCtx, source, sx, sy, sw, sh, offset = { x: 0, y: 0 }) {
-  // source is video or image
-  const srcW = source.videoWidth || source.naturalWidth || source.width;
-  const srcH = source.videoHeight || source.naturalHeight || source.height;
-  if (!srcW || !srcH) return;
-
-  const targetRatio = sw / sh;
-  const sourceRatio = srcW / srcH;
-
-  let drawW, drawH, dx, dy;
-  if (sourceRatio > targetRatio) {
-    // source wider — crop sides, can shift X
-    drawH = srcH;
-    drawW = srcH * targetRatio;
-    const maxShiftX = (srcW - drawW) / 2;
-    dx = maxShiftX + offset.x * maxShiftX; // offset.x in [-1, 1]
-    dx = Math.max(0, Math.min(srcW - drawW, dx));
-    dy = 0;
-  } else {
-    // source taller — crop top/bottom, can shift Y
-    drawW = srcW;
-    drawH = srcW / targetRatio;
-    const maxShiftY = (srcH - drawH) / 2;
-    dx = 0;
-    dy = maxShiftY + offset.y * maxShiftY;
-    dy = Math.max(0, Math.min(srcH - drawH, dy));
-  }
-
-  targetCtx.drawImage(source, dx, dy, drawW, drawH, sx, sy, sw, sh);
-}
-
-// Cell rects in canvas coordinates, populated each render
-let cellRects = []; // [{ source: 'video'|'image', x, y, w, h }]
-
-function renderFrame() {
-  canvas.width = state.width;
-  canvas.height = state.height;
-  canvas.classList.remove('empty');
-  dimReadout.textContent = `${state.width} × ${state.height}`;
-
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  if (!state.videoEl || !state.imageEl) return;
-
-  const W = state.width;
-  const H = state.height;
-  const firstSrc = state.swapped ? 'image' : 'video';
-  const secondSrc = state.swapped ? 'video' : 'image';
-  const firstEl = state.swapped ? state.imageEl : state.videoEl;
-  const secondEl = state.swapped ? state.videoEl : state.imageEl;
-  const firstOff = state.swapped ? state.imageOffset : state.videoOffset;
-  const secondOff = state.swapped ? state.videoOffset : state.imageOffset;
-
-  cellRects = [];
-
-  if (state.layout === 'vertical') {
-    const splitY = Math.round(H * state.split);
-    drawCover(ctx, firstEl, 0, 0, W, splitY, firstOff);
-    drawCover(ctx, secondEl, 0, splitY, W, H - splitY, secondOff);
-    cellRects.push({ source: firstSrc, x: 0, y: 0, w: W, h: splitY });
-    cellRects.push({ source: secondSrc, x: 0, y: splitY, w: W, h: H - splitY });
-  } else {
-    const splitX = Math.round(W * state.split);
-    drawCover(ctx, firstEl, 0, 0, splitX, H, firstOff);
-    drawCover(ctx, secondEl, splitX, 0, W - splitX, H, secondOff);
-    cellRects.push({ source: firstSrc, x: 0, y: 0, w: splitX, h: H });
-    cellRects.push({ source: secondSrc, x: splitX, y: 0, w: W - splitX, h: H });
-  }
-}
-
-function renderLoop() {
-  renderFrame();
-  requestAnimationFrame(renderLoop);
-}
-renderLoop();
+// Re-apply offsets when preview frame size changes (window resize)
+window.addEventListener('resize', () => updatePreview());
 
 // ----- Export
 const exportBtn = document.getElementById('exportBtn');
@@ -1002,33 +1136,72 @@ const progressFill = document.getElementById('progressFill');
 
 exportBtn.addEventListener('click', exportVideo);
 
+function drawCover(targetCtx, source, sx, sy, sw, sh, offset = { x: 0, y: 0 }) {
+  const srcW = source.videoWidth || source.naturalWidth || source.width;
+  const srcH = source.videoHeight || source.naturalHeight || source.height;
+  if (!srcW || !srcH) return;
+
+  const targetRatio = sw / sh;
+  const sourceRatio = srcW / srcH;
+
+  let drawW, drawH, dx, dy;
+  if (sourceRatio > targetRatio) {
+    drawH = srcH;
+    drawW = srcH * targetRatio;
+    const maxShiftX = (srcW - drawW) / 2;
+    dx = maxShiftX + offset.x * maxShiftX;
+    dx = Math.max(0, Math.min(srcW - drawW, dx));
+    dy = 0;
+  } else {
+    drawW = srcW;
+    drawH = srcW / targetRatio;
+    const maxShiftY = (srcH - drawH) / 2;
+    dx = 0;
+    dy = maxShiftY + offset.y * maxShiftY;
+    dy = Math.max(0, Math.min(srcH - drawH, dy));
+  }
+
+  try {
+    targetCtx.drawImage(source, dx, dy, drawW, drawH, sx, sy, sw, sh);
+  } catch (err) {
+    // iOS might throw on cross-origin / protected video
+    console.warn('drawImage failed:', err);
+  }
+}
+
 async function exportVideo() {
   if (!state.videoEl || !state.imageEl) return;
   state.exporting = true;
   exportBtn.disabled = true;
   progressBar.classList.add('active');
   progressFill.style.width = '0%';
-  progress.textContent = 'Recording frames…';
-
-  // Use MediaRecorder on the canvas, which is simpler and works without ffmpeg.wasm
-  // We create an offscreen canvas the actual output size, render to it on rAF, and capture stream.
+  progress.textContent = 'Preparing…';
 
   const off = document.createElement('canvas');
   off.width = state.width;
   off.height = state.height;
   const octx = off.getContext('2d');
 
-  const duration = Math.min(state.videoEl.duration || 6, 30); // cap 30s for safety
+  const duration = Math.min(state.videoEl.duration || 6, 30);
   const fps = 30;
 
-  // Restart video from 0
-  state.videoEl.pause();
-  state.videoEl.currentTime = 0;
-  state.videoEl.muted = true;
-  await new Promise(res => state.videoEl.addEventListener('seeked', res, { once: true }));
+  // Restart video
+  try {
+    state.videoEl.pause();
+    state.videoEl.currentTime = 0;
+    await new Promise(res => {
+      state.videoEl.addEventListener('seeked', res, { once: true });
+      setTimeout(res, 800);
+    });
+  } catch(_) {}
+
+  if (typeof off.captureStream !== 'function') {
+    showError('This browser does not support canvas recording.');
+    cleanupExport();
+    return;
+  }
 
   const stream = off.captureStream(fps);
-  // Pick a supported mime
   const candidates = [
     'video/mp4;codecs=h264',
     'video/mp4',
@@ -1039,10 +1212,10 @@ async function exportVideo() {
   ];
   let mime = '';
   for (const c of candidates) {
-    if (MediaRecorder.isTypeSupported(c)) { mime = c; break; }
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(c)) { mime = c; break; }
   }
   if (!mime) {
-    progress.textContent = 'No supported video codec in this browser.';
+    showError('No supported video codec in this browser. Try Chrome.');
     cleanupExport();
     return;
   }
@@ -1068,13 +1241,19 @@ async function exportVideo() {
   };
 
   recorder.start();
-  state.videoEl.play();
+  const playPromise = state.videoEl.play();
+  if (playPromise && playPromise.catch) {
+    playPromise.catch(() => {
+      showError('Tap the preview first to enable playback, then export.');
+      try { recorder.stop(); } catch(_) {}
+      cleanupExport();
+    });
+  }
 
   const startTs = performance.now();
 
   function tickRecord() {
     if (stopped) return;
-    // Draw to offscreen
     const W = off.width;
     const H = off.height;
     octx.fillStyle = '#000';
@@ -1102,7 +1281,7 @@ async function exportVideo() {
 
     if (elapsed >= duration) {
       recorder.stop();
-      state.videoEl.pause();
+      try { state.videoEl.pause(); } catch(_) {}
       return;
     }
     requestAnimationFrame(tickRecord);
@@ -1114,6 +1293,10 @@ function cleanupExport() {
   state.exporting = false;
   exportBtn.disabled = !(state.videoEl && state.imageEl);
 }
+
+// Initial setup
+previewFrame.style.aspectRatio = `${state.width} / ${state.height}`;
+if (dimReadout) dimReadout.textContent = `${state.width} × ${state.height}`;
 </script>
 
 </body>
