@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Grid Studio — Video × Image</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,700;1,9..144,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ffmpeg/0.12.10/ffmpeg.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ffmpeg-util/0.12.1/util.min.js"></script>
+<style>
+:root {
+  --bg: #0e0d0b;
+  --bg-2: #16140f;
+  --ink: #f5f0e6;
+  --ink-dim: #a39b8a;
+  --accent: #d94a26;
+  --accent-2: #e8b04a;
+  --line: #2a2620;
+  --grain-opacity: 0.08;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'Fraunces', serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Grain overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 100;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  mix-blend-mode: overlay;
+}
+
+/* Vignette */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 99;
+  background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.5) 100%);
+}
+
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 32px 24px 80px;
+  position: relative;
+  z-index: 1;
+}
+
+/* Header */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 40px;
+}
+
+.logo {
+  font-family: 'Fraunces', serif;
+  font-weight: 300;
+  font-size: clamp(32px, 5vw, 56px);
+  letter-spacing: -0.03em;
+  line-height: 0.9;
+}
+.logo em {
+  font-style: italic;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.meta {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--ink-dim);
+  text-align: right;
+  line-height: 1.6;
+}
+.meta .dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  background: var(--accent-2);
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: middle;
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* Layout */
+.studio {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 48px;
+}
+@media (max-width: 900px) {
+  .studio { grid-template-columns: 1fr; gap: 32px; }
+}
+
+/* Preview area */
+.preview-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.preview-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: flex;
+  justify-content: space-between;
+}
+.preview-label .hint {
+  font-family: 'Fraunces', serif;
+  font-style: italic;
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--accent-2);
+  margin-left: 12px;
+  opacity: 0.7;
+}
+
+#previewCanvas:not(.empty) {
+  cursor: grab;
+}
+#previewCanvas:not(.empty):active,
+#previewCanvas.dragging {
+  cursor: grabbing;
+}
+
+.canvas-stage {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 500px;
+  position: relative;
+}
+
+.canvas-stage::before {
+  display: none;
+}
+
+#previewCanvas {
+  max-width: 100%;
+  max-height: 70vh;
+  background: #000;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  display: block;
+}
+
+#previewCanvas.empty {
+  background: repeating-linear-gradient(45deg, #1a1812, #1a1812 10px, #16140f 10px, #16140f 20px);
+  width: 100%;
+  aspect-ratio: 9/16;
+  max-width: 320px;
+}
+
+.empty-msg {
+  position: absolute;
+  text-align: center;
+  font-family: 'Fraunces', serif;
+  font-style: italic;
+  color: var(--ink-dim);
+  font-size: 18px;
+  pointer-events: none;
+}
+
+/* Controls */
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.section {
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+}
+.section:first-child { border-top: none; padding-top: 0; }
+
+.section-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.section-title::before {
+  content: '';
+  width: 18px;
+  height: 1px;
+  background: var(--accent);
+}
+
+/* Upload zones */
+.upload-zone {
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  padding: 20px 18px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  position: relative;
+  overflow: hidden;
+}
+.upload-zone:hover {
+  border-color: var(--accent);
+  background: #1a1812;
+}
+.upload-zone.has-file {
+  border-color: var(--accent-2);
+}
+.upload-zone input { display: none; }
+
+.upload-label {
+  font-family: 'Fraunces', serif;
+  font-size: 16px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.upload-label .num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--ink-dim);
+  font-weight: 400;
+}
+.upload-hint {
+  font-size: 12px;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+.upload-filename {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--accent-2);
+  margin-top: 8px;
+  word-break: break-all;
+}
+
+/* Preset buttons */
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.preset {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  padding: 10px 2px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  letter-spacing: 0.05em;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.preset:hover {
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+.preset.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(217, 74, 38, 0.08);
+}
+.preset-name {
+  font-size: 11px;
+}
+.preset-sub {
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  opacity: 0.7;
+}
+
+.custom-size {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.custom-size input {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  padding: 10px 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  width: 100%;
+}
+.custom-size input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.custom-size .x {
+  font-family: 'Fraunces', serif;
+  font-style: italic;
+  color: var(--ink-dim);
+}
+
+/* Layout toggle */
+.layout-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.layout-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  padding: 14px 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+.layout-btn:hover { color: var(--ink); border-color: var(--ink-dim); }
+.layout-btn.active { border-color: var(--accent); color: var(--accent); }
+.layout-btn svg { width: 28px; height: 28px; }
+
+/* Swap button */
+.swap-btn {
+  width: 100%;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.swap-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.swap-btn svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 0.4s ease;
+}
+.swap-btn.swapped svg {
+  transform: rotate(180deg);
+}
+
+/* Position slider */
+.split-control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.split-control input[type="range"] {
+  -webkit-appearance: none;
+  width: 100%;
+  background: transparent;
+}
+.split-control input[type="range"]::-webkit-slider-runnable-track {
+  height: 1px;
+  background: var(--line);
+}
+.split-control input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  background: var(--accent);
+  margin-top: -7px;
+  cursor: pointer;
+  border-radius: 0;
+}
+.split-control input[type="range"]::-moz-range-track {
+  height: 1px; background: var(--line);
+}
+.split-control input[type="range"]::-moz-range-thumb {
+  width: 14px; height: 14px;
+  background: var(--accent);
+  border: none; border-radius: 0;
+  cursor: pointer;
+}
+.split-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--ink-dim);
+  display: flex;
+  justify-content: space-between;
+}
+
+/* Export button */
+.export-btn {
+  width: 100%;
+  background: var(--accent);
+  color: var(--ink);
+  border: none;
+  padding: 18px;
+  font-family: 'Fraunces', serif;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  position: relative;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.export-btn:hover:not(:disabled) {
+  background: #c43e1e;
+  letter-spacing: 0.08em;
+}
+.export-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.export-btn em {
+  font-style: italic;
+  font-weight: 300;
+}
+
+.progress {
+  margin-top: 16px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--ink-dim);
+  min-height: 18px;
+}
+.progress-bar {
+  height: 2px;
+  background: var(--line);
+  margin-top: 8px;
+  overflow: hidden;
+  display: none;
+}
+.progress-bar.active { display: block; }
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+/* Footnote */
+.footnote {
+  margin-top: 60px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--ink-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  display: flex;
+  justify-content: space-between;
+}
+
+/* Page-load reveal */
+.fade-in {
+  opacity: 0;
+  transform: translateY(8px);
+  animation: fadeUp 0.7s ease forwards;
+}
+.fade-in:nth-child(1) { animation-delay: 0.05s; }
+.fade-in:nth-child(2) { animation-delay: 0.15s; }
+.fade-in:nth-child(3) { animation-delay: 0.25s; }
+.fade-in:nth-child(4) { animation-delay: 0.35s; }
+.fade-in:nth-child(5) { animation-delay: 0.45s; }
+@keyframes fadeUp {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <header class="fade-in">
+    <div class="logo">Grid<em> Studio</em></div>
+    <div class="meta">
+      <span class="dot"></span>browser native<br>
+      v.001 — moving + still
+    </div>
+  </header>
+
+  <div class="studio">
+
+    <div class="preview-wrap fade-in">
+      <div class="preview-label">
+        <span>// preview <em class="hint" id="dragHint">drag a cell to reposition</em></span>
+        <span id="dimReadout">— × —</span>
+      </div>
+      <div class="canvas-stage">
+        <canvas id="previewCanvas" class="empty" width="1080" height="1920"></canvas>
+        <div class="empty-msg" id="emptyMsg">Upload a video and an image to begin</div>
+      </div>
+    </div>
+
+    <div class="controls">
+
+      <div class="section fade-in">
+        <div class="section-title">Source</div>
+
+        <label class="upload-zone" id="videoZone">
+          <input type="file" id="videoInput" accept="video/*">
+          <div class="upload-label">
+            Video <span class="num">01 / mp4 · mov</span>
+          </div>
+          <div class="upload-hint">Click to choose a clip</div>
+          <div class="upload-filename" id="videoName"></div>
+        </label>
+
+        <div style="height: 10px;"></div>
+
+        <label class="upload-zone" id="imageZone">
+          <input type="file" id="imageInput" accept="image/*">
+          <div class="upload-label">
+            Still <span class="num">02 / jpg · png</span>
+          </div>
+          <div class="upload-hint">Click to choose an image</div>
+          <div class="upload-filename" id="imageName"></div>
+        </label>
+      </div>
+
+      <div class="section fade-in">
+        <div class="section-title">Arrangement</div>
+        <div class="layout-toggle">
+          <button class="layout-btn active" data-layout="vertical">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="5" y="3" width="14" height="8"/>
+              <rect x="5" y="13" width="14" height="8"/>
+            </svg>
+            Top / Bottom
+          </button>
+          <button class="layout-btn" data-layout="horizontal">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="3" y="5" width="8" height="14"/>
+              <rect x="13" y="5" width="8" height="14"/>
+            </svg>
+            Side by Side
+          </button>
+        </div>
+
+        <div style="height: 12px;"></div>
+
+        <button class="swap-btn" id="swapBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M7 4v16M7 4l-3 3M7 4l3 3" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M17 20V4M17 20l-3-3M17 20l3-3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span id="swapLabel">Swap positions</span>
+        </button>
+
+        <div style="height: 16px;"></div>
+
+        <div class="split-control">
+          <div class="split-value">
+            <span>Split position</span>
+            <span id="splitVal">50%</span>
+          </div>
+          <input type="range" id="splitInput" min="20" max="80" value="50">
+        </div>
+
+        <div style="height: 12px;"></div>
+
+        <button class="swap-btn" id="resetCropBtn" style="font-size: 10px;">
+          Reset crop positions
+        </button>
+      </div>
+
+      <div class="section fade-in">
+        <div class="section-title">Output Size</div>
+        <div class="preset-grid">
+          <button class="preset" data-preset="custom">
+            <span class="preset-name">Custom</span>
+            <span class="preset-sub">—</span>
+          </button>
+          <button class="preset" data-preset="1:1">
+            <span class="preset-name">1 : 1</span>
+            <span class="preset-sub">2K</span>
+          </button>
+          <button class="preset" data-preset="4:5">
+            <span class="preset-name">4 : 5</span>
+            <span class="preset-sub">2K</span>
+          </button>
+          <button class="preset active" data-preset="9:16">
+            <span class="preset-name">Story</span>
+            <span class="preset-sub">2K</span>
+          </button>
+          <button class="preset" data-preset="4K">
+            <span class="preset-name">9 : 16</span>
+            <span class="preset-sub">4K</span>
+          </button>
+        </div>
+        <div class="custom-size">
+          <input type="number" id="widthInput" value="1440" min="100" max="4096">
+          <span class="x">×</span>
+          <input type="number" id="heightInput" value="2560" min="100" max="4096">
+        </div>
+      </div>
+
+      <div class="section fade-in">
+        <button class="export-btn" id="exportBtn" disabled>
+          Export <em>MP4</em>
+        </button>
+        <div class="progress" id="progress"></div>
+        <div class="progress-bar" id="progressBar">
+          <div class="progress-bar-fill" id="progressFill"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="footnote">
+    <span>// runs locally · ffmpeg.wasm</span>
+    <span>no upload · no server</span>
+  </div>
+
+</div>
+
+<script>
+const state = {
+  videoFile: null,
+  videoEl: null,
+  imageFile: null,
+  imageEl: null,
+  layout: 'vertical', // vertical | horizontal
+  swapped: false, // false: video first (top/left), true: image first
+  split: 0.5,
+  // Crop offsets per source: -1 to 1, where 0 is centered
+  // For portrait source in landscape cell: offsetY shifts vertically
+  // For landscape source in portrait cell: offsetX shifts horizontally
+  videoOffset: { x: 0, y: 0 },
+  imageOffset: { x: 0, y: 0 },
+  width: 1440,
+  height: 2560,
+  preset: '9:16',
+  exporting: false,
+};
+
+const PRESETS = {
+  '1:1':   { w: 1440, h: 1440 },   // 2K square
+  '4:5':   { w: 1440, h: 1800 },   // 2K 4:5
+  '9:16':  { w: 1440, h: 2560 },   // true 2K vertical
+  '4K':    { w: 2160, h: 3840 },   // 4K vertical
+};
+
+const canvas = document.getElementById('previewCanvas');
+const ctx = canvas.getContext('2d');
+const emptyMsg = document.getElementById('emptyMsg');
+const dimReadout = document.getElementById('dimReadout');
+
+// ----- File inputs
+document.getElementById('videoInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  state.videoFile = file;
+  document.getElementById('videoName').textContent = file.name;
+  document.getElementById('videoZone').classList.add('has-file');
+
+  if (state.videoEl) URL.revokeObjectURL(state.videoEl.src);
+  const v = document.createElement('video');
+  v.src = URL.createObjectURL(file);
+  v.muted = true;
+  v.loop = true;
+  v.playsInline = true;
+  await new Promise((res) => v.addEventListener('loadeddata', res, { once: true }));
+  v.play();
+  state.videoEl = v;
+  checkReady();
+});
+
+document.getElementById('imageInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  state.imageFile = file;
+  document.getElementById('imageName').textContent = file.name;
+  document.getElementById('imageZone').classList.add('has-file');
+
+  if (state.imageEl) URL.revokeObjectURL(state.imageEl.src);
+  const img = new Image();
+  img.src = URL.createObjectURL(file);
+  await new Promise((res) => img.addEventListener('load', res, { once: true }));
+  state.imageEl = img;
+  checkReady();
+});
+
+function checkReady() {
+  const ready = state.videoEl && state.imageEl;
+  document.getElementById('exportBtn').disabled = !ready || state.exporting;
+  if (ready) emptyMsg.style.display = 'none';
+}
+
+// ----- Layout
+document.querySelectorAll('.layout-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.layout-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.layout = btn.dataset.layout;
+  });
+});
+
+// ----- Swap
+const swapBtn = document.getElementById('swapBtn');
+const swapLabel = document.getElementById('swapLabel');
+swapBtn.addEventListener('click', () => {
+  state.swapped = !state.swapped;
+  swapBtn.classList.toggle('swapped', state.swapped);
+  swapLabel.textContent = state.swapped ? 'Image first' : 'Video first';
+});
+
+// ----- Split
+const splitInput = document.getElementById('splitInput');
+const splitVal = document.getElementById('splitVal');
+splitInput.addEventListener('input', () => {
+  state.split = splitInput.value / 100;
+  splitVal.textContent = splitInput.value + '%';
+});
+
+// ----- Reset crops
+document.getElementById('resetCropBtn').addEventListener('click', () => {
+  state.videoOffset = { x: 0, y: 0 };
+  state.imageOffset = { x: 0, y: 0 };
+});
+
+// ----- Drag to reposition crop
+let drag = null; // { source: 'video'|'image', startX, startY, startOffset, cellRect }
+
+function getEventPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  return {
+    x: (t.clientX - rect.left) * scaleX,
+    y: (t.clientY - rect.top) * scaleY,
+    clientX: t.clientX,
+    clientY: t.clientY,
+  };
+}
+
+function findCellAt(canvasX, canvasY) {
+  for (const r of cellRects) {
+    if (canvasX >= r.x && canvasX < r.x + r.w &&
+        canvasY >= r.y && canvasY < r.y + r.h) return r;
+  }
+  return null;
+}
+
+function getSourceEl(name) {
+  return name === 'video' ? state.videoEl : state.imageEl;
+}
+function getOffset(name) {
+  return name === 'video' ? state.videoOffset : state.imageOffset;
+}
+
+function startDrag(e) {
+  if (!state.videoEl || !state.imageEl) return;
+  const pos = getEventPos(e);
+  const cell = findCellAt(pos.x, pos.y);
+  if (!cell) return;
+  e.preventDefault();
+  const offset = getOffset(cell.source);
+  drag = {
+    source: cell.source,
+    startClientX: pos.clientX,
+    startClientY: pos.clientY,
+    startOffset: { ...offset },
+    cellRect: cell,
+  };
+  canvas.classList.add('dragging');
+}
+
+function moveDrag(e) {
+  if (!drag) return;
+  e.preventDefault();
+  const t = e.touches ? e.touches[0] : e;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const dxClient = t.clientX - drag.startClientX;
+  const dyClient = t.clientY - drag.startClientY;
+  const dxCanvas = dxClient * scaleX;
+  const dyCanvas = dyClient * scaleY;
+
+  const src = getSourceEl(drag.source);
+  const srcW = src.videoWidth || src.naturalWidth || src.width;
+  const srcH = src.videoHeight || src.naturalHeight || src.height;
+  const sw = drag.cellRect.w;
+  const sh = drag.cellRect.h;
+  const targetRatio = sw / sh;
+  const sourceRatio = srcW / srcH;
+
+  // Compute the visible region size in source pixels and how much "slack" is available
+  let drawW, drawH, slackX = 0, slackY = 0;
+  if (sourceRatio > targetRatio) {
+    drawH = srcH;
+    drawW = srcH * targetRatio;
+    slackX = (srcW - drawW); // total moveable range in source pixels
+  } else {
+    drawW = srcW;
+    drawH = srcW / targetRatio;
+    slackY = (srcH - drawH);
+  }
+
+  // Convert canvas drag distance to source-pixel distance
+  // In the cell, canvas px maps to source px by ratio drawW/sw (or drawH/sh)
+  const sourcePerCanvasX = drawW / sw;
+  const sourcePerCanvasY = drawH / sh;
+
+  const newOffset = { ...drag.startOffset };
+
+  if (slackX > 0) {
+    // Drag right -> show more of the left side -> dx in source decreases
+    const deltaSourcePx = -dxCanvas * sourcePerCanvasX;
+    // offset.x in [-1,1] maps to [0, slackX]; default center is slackX/2
+    // dx_source = slackX/2 + offset.x * slackX/2
+    // so delta in offset.x = (delta in dx_source) / (slackX/2)
+    newOffset.x = drag.startOffset.x + (deltaSourcePx / (slackX / 2));
+    newOffset.x = Math.max(-1, Math.min(1, newOffset.x));
+  }
+  if (slackY > 0) {
+    const deltaSourcePy = -dyCanvas * sourcePerCanvasY;
+    newOffset.y = drag.startOffset.y + (deltaSourcePy / (slackY / 2));
+    newOffset.y = Math.max(-1, Math.min(1, newOffset.y));
+  }
+
+  if (drag.source === 'video') state.videoOffset = newOffset;
+  else state.imageOffset = newOffset;
+}
+
+function endDrag() {
+  drag = null;
+  canvas.classList.remove('dragging');
+}
+
+canvas.addEventListener('mousedown', startDrag);
+window.addEventListener('mousemove', moveDrag);
+window.addEventListener('mouseup', endDrag);
+canvas.addEventListener('touchstart', startDrag, { passive: false });
+window.addEventListener('touchmove', moveDrag, { passive: false });
+window.addEventListener('touchend', endDrag);
+
+// ----- Preset / size
+const widthInput = document.getElementById('widthInput');
+const heightInput = document.getElementById('heightInput');
+
+document.querySelectorAll('.preset').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.preset').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const p = btn.dataset.preset;
+    state.preset = p;
+    if (PRESETS[p]) {
+      widthInput.value = PRESETS[p].w;
+      heightInput.value = PRESETS[p].h;
+      state.width = PRESETS[p].w;
+      state.height = PRESETS[p].h;
+    }
+  });
+});
+
+[widthInput, heightInput].forEach(el => {
+  el.addEventListener('input', () => {
+    state.width = parseInt(widthInput.value) || 1080;
+    state.height = parseInt(heightInput.value) || 1920;
+    document.querySelectorAll('.preset').forEach(b => b.classList.remove('active'));
+    document.querySelector('[data-preset="custom"]').classList.add('active');
+    state.preset = 'custom';
+  });
+});
+
+// ----- Drawing helpers
+function drawCover(targetCtx, source, sx, sy, sw, sh, offset = { x: 0, y: 0 }) {
+  // source is video or image
+  const srcW = source.videoWidth || source.naturalWidth || source.width;
+  const srcH = source.videoHeight || source.naturalHeight || source.height;
+  if (!srcW || !srcH) return;
+
+  const targetRatio = sw / sh;
+  const sourceRatio = srcW / srcH;
+
+  let drawW, drawH, dx, dy;
+  if (sourceRatio > targetRatio) {
+    // source wider — crop sides, can shift X
+    drawH = srcH;
+    drawW = srcH * targetRatio;
+    const maxShiftX = (srcW - drawW) / 2;
+    dx = maxShiftX + offset.x * maxShiftX; // offset.x in [-1, 1]
+    dx = Math.max(0, Math.min(srcW - drawW, dx));
+    dy = 0;
+  } else {
+    // source taller — crop top/bottom, can shift Y
+    drawW = srcW;
+    drawH = srcW / targetRatio;
+    const maxShiftY = (srcH - drawH) / 2;
+    dx = 0;
+    dy = maxShiftY + offset.y * maxShiftY;
+    dy = Math.max(0, Math.min(srcH - drawH, dy));
+  }
+
+  targetCtx.drawImage(source, dx, dy, drawW, drawH, sx, sy, sw, sh);
+}
+
+// Cell rects in canvas coordinates, populated each render
+let cellRects = []; // [{ source: 'video'|'image', x, y, w, h }]
+
+function renderFrame() {
+  canvas.width = state.width;
+  canvas.height = state.height;
+  canvas.classList.remove('empty');
+  dimReadout.textContent = `${state.width} × ${state.height}`;
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (!state.videoEl || !state.imageEl) return;
+
+  const W = state.width;
+  const H = state.height;
+  const firstSrc = state.swapped ? 'image' : 'video';
+  const secondSrc = state.swapped ? 'video' : 'image';
+  const firstEl = state.swapped ? state.imageEl : state.videoEl;
+  const secondEl = state.swapped ? state.videoEl : state.imageEl;
+  const firstOff = state.swapped ? state.imageOffset : state.videoOffset;
+  const secondOff = state.swapped ? state.videoOffset : state.imageOffset;
+
+  cellRects = [];
+
+  if (state.layout === 'vertical') {
+    const splitY = Math.round(H * state.split);
+    drawCover(ctx, firstEl, 0, 0, W, splitY, firstOff);
+    drawCover(ctx, secondEl, 0, splitY, W, H - splitY, secondOff);
+    cellRects.push({ source: firstSrc, x: 0, y: 0, w: W, h: splitY });
+    cellRects.push({ source: secondSrc, x: 0, y: splitY, w: W, h: H - splitY });
+  } else {
+    const splitX = Math.round(W * state.split);
+    drawCover(ctx, firstEl, 0, 0, splitX, H, firstOff);
+    drawCover(ctx, secondEl, splitX, 0, W - splitX, H, secondOff);
+    cellRects.push({ source: firstSrc, x: 0, y: 0, w: splitX, h: H });
+    cellRects.push({ source: secondSrc, x: splitX, y: 0, w: W - splitX, h: H });
+  }
+}
+
+function renderLoop() {
+  renderFrame();
+  requestAnimationFrame(renderLoop);
+}
+renderLoop();
+
+// ----- Export
+const exportBtn = document.getElementById('exportBtn');
+const progress = document.getElementById('progress');
+const progressBar = document.getElementById('progressBar');
+const progressFill = document.getElementById('progressFill');
+
+exportBtn.addEventListener('click', exportVideo);
+
+async function exportVideo() {
+  if (!state.videoEl || !state.imageEl) return;
+  state.exporting = true;
+  exportBtn.disabled = true;
+  progressBar.classList.add('active');
+  progressFill.style.width = '0%';
+  progress.textContent = 'Recording frames…';
+
+  // Use MediaRecorder on the canvas, which is simpler and works without ffmpeg.wasm
+  // We create an offscreen canvas the actual output size, render to it on rAF, and capture stream.
+
+  const off = document.createElement('canvas');
+  off.width = state.width;
+  off.height = state.height;
+  const octx = off.getContext('2d');
+
+  const duration = Math.min(state.videoEl.duration || 6, 30); // cap 30s for safety
+  const fps = 30;
+
+  // Restart video from 0
+  state.videoEl.pause();
+  state.videoEl.currentTime = 0;
+  state.videoEl.muted = true;
+  await new Promise(res => state.videoEl.addEventListener('seeked', res, { once: true }));
+
+  const stream = off.captureStream(fps);
+  // Pick a supported mime
+  const candidates = [
+    'video/mp4;codecs=h264',
+    'video/mp4',
+    'video/webm;codecs=h264',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+  let mime = '';
+  for (const c of candidates) {
+    if (MediaRecorder.isTypeSupported(c)) { mime = c; break; }
+  }
+  if (!mime) {
+    progress.textContent = 'No supported video codec in this browser.';
+    cleanupExport();
+    return;
+  }
+
+  const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12_000_000 });
+  const chunks = [];
+  recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+
+  let stopped = false;
+  recorder.onstop = () => {
+    stopped = true;
+    const blob = new Blob(chunks, { type: mime });
+    const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `grid-studio-${Date.now()}.${ext}`;
+    a.click();
+    URL.revokeObjectURL(url);
+    progress.textContent = `Done — saved as .${ext} (${(blob.size/1024/1024).toFixed(1)} MB)`;
+    progressFill.style.width = '100%';
+    cleanupExport();
+  };
+
+  recorder.start();
+  state.videoEl.play();
+
+  const startTs = performance.now();
+
+  function tickRecord() {
+    if (stopped) return;
+    // Draw to offscreen
+    const W = off.width;
+    const H = off.height;
+    octx.fillStyle = '#000';
+    octx.fillRect(0, 0, W, H);
+
+    const firstEl = state.swapped ? state.imageEl : state.videoEl;
+    const secondEl = state.swapped ? state.videoEl : state.imageEl;
+    const firstOff = state.swapped ? state.imageOffset : state.videoOffset;
+    const secondOff = state.swapped ? state.videoOffset : state.imageOffset;
+
+    if (state.layout === 'vertical') {
+      const splitY = Math.round(H * state.split);
+      drawCover(octx, firstEl, 0, 0, W, splitY, firstOff);
+      drawCover(octx, secondEl, 0, splitY, W, H - splitY, secondOff);
+    } else {
+      const splitX = Math.round(W * state.split);
+      drawCover(octx, firstEl, 0, 0, splitX, H, firstOff);
+      drawCover(octx, secondEl, splitX, 0, W - splitX, H, secondOff);
+    }
+
+    const elapsed = (performance.now() - startTs) / 1000;
+    const pct = Math.min(elapsed / duration, 1);
+    progress.textContent = `Recording… ${Math.round(pct * 100)}%`;
+    progressFill.style.width = (pct * 100) + '%';
+
+    if (elapsed >= duration) {
+      recorder.stop();
+      state.videoEl.pause();
+      return;
+    }
+    requestAnimationFrame(tickRecord);
+  }
+  requestAnimationFrame(tickRecord);
+}
+
+function cleanupExport() {
+  state.exporting = false;
+  exportBtn.disabled = !(state.videoEl && state.imageEl);
+}
+</script>
+
+</body>
+</html>
